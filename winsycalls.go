@@ -8,6 +8,9 @@ import (
 const (
 	InvalidHandle         = ^Handle(0)
 	errnoERROR_IO_PENDING = 997
+	AF_INET               = 2
+	SOCK_RAW              = 3
+	IPPROTO_ICMP          = 1
 )
 
 var (

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"golang.org/x/sys/windows"
 	"math/rand"
 	"net"
 	"os"
@@ -44,7 +43,7 @@ func main() {
 }
 
 func ping(destinationAddress [4]byte, payloadLen int, count int) error {
-	fd, err := Socket(windows.AF_INET, windows.SOCK_RAW, 1)
+	fd, err := Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)
 	if err != nil {
 		return err
 	}

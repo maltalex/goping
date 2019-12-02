@@ -6,11 +6,11 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"golang.org/x/sys/windows"
-	"log"
 	"math/rand"
 	"net"
 	"os"
 	"strconv"
+	"time"
 )
 
 const (
@@ -28,34 +28,50 @@ var (
 
 func main() {
 	dest, payloadLen, count, err := parseArgs()
-	fmt.Printf("dest: %v  payload len: %v  count: %v err: %v\n", dest, payloadLen, count, err)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
 		os.Exit(-1)
 	}
-
 	destinationAddress, err := resolveIPv4(dest)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
 		os.Exit(-2)
 	}
+	if err := ping(destinationAddress, payloadLen, count); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
+		os.Exit(-3)
+	}
+}
 
-	packet, err := generateEchoRequest(payloadLen)
+func ping(destinationAddress [4]byte, payloadLen int, count int) error {
 	fd, err := Socket(windows.AF_INET, windows.SOCK_RAW, 1)
 	if err != nil {
-		fmt.Print(err.Error())
+		return err
 	}
 	destAddress := SockaddrInet4{
 		Addr: destinationAddress,
 	}
-	err = Sendto(fd, packet, 0, &destAddress)
-	if err != nil {
-		log.Fatal("Sendto:", err)
-	}
-
 	buf := make([]byte, 1500)
-	n, _, _ := Recvfrom(fd, buf, 0)
-	parseAndPrintICMPv4(buf[0:n])
+	id := rand.Int()
+	for i := 0; i < count; i++ {
+		sendTime := time.Now()
+		packet, err := generateEchoRequest(payloadLen, uint16(id), uint16(i)+1)
+		if err != nil {
+			return err
+		}
+		err = Sendto(fd, packet, 0, &destAddress)
+		if err != nil {
+			return err
+		}
+		n, _, err := Recvfrom(fd, buf, 0)
+		if err != nil {
+			return err
+		}
+		rtt := float32(time.Now().UnixNano()-sendTime.UnixNano()) / 1e6
+		parseAndPrintICMPv4(buf[0:n], rtt)
+		time.Sleep(1 * time.Second)
+	}
+	return nil
 }
 
 func resolveIPv4(name string) (address [4]byte, err error) {
@@ -85,13 +101,11 @@ func parseArgs() (dest string, payloadSize int, count int, err error) {
 		if currentArg[0] == '-' {
 			switch currentArg[1] {
 			case 's':
-				payloadSize, err = parseNumericArgument(i, argCount)
-				if payloadSize < 0 || payloadSize > 16*1024-8 {
+				if payloadSize, err = parseNumericArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
 					err = ErrBadParameter
 				}
 			case 'c':
-				count, err = parseNumericArgument(i, argCount)
-				if err != nil || count <= 0 {
+				if count, err = parseNumericArgument(i, argCount); err != nil || count <= 0 {
 					err = ErrBadParameter
 				}
 			default:
@@ -113,23 +127,22 @@ func parseNumericArgument(index, argCount int) (value int, err error) {
 	return 0, ErrShowUsage
 }
 
-func parseAndPrintICMPv4(buf []byte) {
+func parseAndPrintICMPv4(buf []byte, rtt float32) {
 	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
-		fmt.Printf("Source %v TTL %v\n", ip.SrcIP, ip.TTL)
-	}
-	if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
-		icmp, _ := icmpLayer.(*layers.ICMPv4)
-		fmt.Printf("Seq %v Id %v\n", icmp.Seq, icmp.Id)
+		if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
+			icmp, _ := icmpLayer.(*layers.ICMPv4)
+			fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n", ip.Length-uint16(ip.IHL)*4, ip.SrcIP, icmp.Seq, ip.TTL, rtt)
+		}
 	}
 }
 
-func generateEchoRequest(payloadLen int) (buf []byte, err error) {
+func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error) {
 	icmp := &layers.ICMPv4{
 		TypeCode: 0x0800,
-		Id:       0,
-		Seq:      0,
+		Id:       id,
+		Seq:      seq,
 	}
 	sbuf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{

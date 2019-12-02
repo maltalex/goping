@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 	"log"
 	"math/rand"
+	"net"
 	"os"
 	"strconv"
 )
@@ -19,9 +20,10 @@ const (
 )
 
 var (
-	ErrUnknownSwitch = errors.New("unknown switch")
-	ErrShowUsage     = errors.New("bad command line arguments")
-	ErrBadParameter  = errors.New("invalid parameter")
+	ErrUnknownSwitch  = errors.New("unknown switch")
+	ErrShowUsage      = errors.New("bad command line arguments")
+	ErrBadParameter   = errors.New("invalid parameter")
+	ErrNameResolution = errors.New("could not resolve destination")
 )
 
 func main() {
@@ -32,14 +34,19 @@ func main() {
 		os.Exit(-1)
 	}
 
+	destinationAddress, err := resolveIPv4(dest)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
+		os.Exit(-2)
+	}
+
 	packet, err := generateEchoRequest(payloadLen)
 	fd, err := Socket(windows.AF_INET, windows.SOCK_RAW, 1)
 	if err != nil {
 		fmt.Print(err.Error())
 	}
 	destAddress := SockaddrInet4{
-		Port: 0,
-		Addr: [4]byte{10, 0, 0, 1},
+		Addr: destinationAddress,
 	}
 	err = Sendto(fd, packet, 0, &destAddress)
 	if err != nil {
@@ -49,6 +56,19 @@ func main() {
 	buf := make([]byte, 1500)
 	n, _, _ := Recvfrom(fd, buf, 0)
 	parseAndPrintICMPv4(buf[0:n])
+}
+
+func resolveIPv4(name string) (address [4]byte, err error) {
+	res, err := net.ResolveIPAddr("ip4", name)
+	if err != nil || res.IP.To4() == nil {
+		err = ErrNameResolution
+		return
+	}
+	ipLen := len(res.IP)
+	for i := 0; i < 4; i++ {
+		address[i] = res.IP[ipLen-4+i]
+	}
+	return
 }
 
 func parseArgs() (dest string, payloadSize int, count int, err error) {

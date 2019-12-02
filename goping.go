@@ -16,7 +16,7 @@ import (
 const (
 	usage              = `Usage: [-c count] [-s payload size] <destination>`
 	defaultPayloadSize = 56
-	defaultCount       = -1
+	defaultCount       = 4
 )
 
 var (

@@ -1,16 +1,38 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"golang.org/x/sys/windows"
 	"log"
 	"math/rand"
+	"os"
+	"strconv"
+)
+
+const (
+	usage              = `Usage: [-c count] [-s payload size] <destination>`
+	defaultPayloadSize = 56
+	defaultCount       = -1
+)
+
+var (
+	ErrUnknownSwitch = errors.New("unknown switch")
+	ErrShowUsage     = errors.New("bad command line arguments")
+	ErrBadParameter  = errors.New("invalid parameter")
 )
 
 func main() {
-	packet, err := generateEchoRequest(100)
+	dest, payloadLen, count, err := parseArgs()
+	fmt.Printf("dest: %v  payload len: %v  count: %v err: %v\n", dest, payloadLen, count, err)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
+		os.Exit(-1)
+	}
+
+	packet, err := generateEchoRequest(payloadLen)
 	fd, err := Socket(windows.AF_INET, windows.SOCK_RAW, 1)
 	if err != nil {
 		fmt.Print(err.Error())
@@ -27,6 +49,48 @@ func main() {
 	buf := make([]byte, 1500)
 	n, _, _ := Recvfrom(fd, buf, 0)
 	parseAndPrintICMPv4(buf[0:n])
+}
+
+func parseArgs() (dest string, payloadSize int, count int, err error) {
+	dest = ""
+	payloadSize = defaultPayloadSize
+	argCount := len(os.Args)
+	if argCount < 2 {
+		return "", defaultPayloadSize, defaultCount, ErrShowUsage
+	}
+
+	dest = os.Args[argCount-1]
+	for i := 1; i < argCount-1; i++ {
+		currentArg := os.Args[i]
+		if currentArg[0] == '-' {
+			switch currentArg[1] {
+			case 's':
+				payloadSize, err = parseNumericArgument(i, argCount)
+				if payloadSize < 0 || payloadSize > 16*1024-8 {
+					err = ErrBadParameter
+				}
+			case 'c':
+				count, err = parseNumericArgument(i, argCount)
+				if err != nil || count <= 0 {
+					err = ErrBadParameter
+				}
+			default:
+				err = ErrUnknownSwitch
+			}
+		}
+	}
+	return
+}
+
+func parseNumericArgument(index, argCount int) (value int, err error) {
+	if index+1 < argCount-1 {
+		value, err = strconv.Atoi(os.Args[index+1])
+		if err != nil {
+			err = ErrBadParameter
+		}
+		return
+	}
+	return 0, ErrShowUsage
 }
 
 func parseAndPrintICMPv4(buf []byte) {

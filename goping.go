@@ -16,7 +16,7 @@ const (
 	usage              = `Usage: [-c count] [-s payload size] <destination>`
 	defaultPayloadSize = 56
 	defaultCount       = 4
-	defaultSleep       = 1 * time.Second
+	defaultInterval    = 1 * time.Second
 )
 
 var (
@@ -24,6 +24,11 @@ var (
 	ErrShowUsage      = errors.New("bad command line arguments")
 	ErrBadParameter   = errors.New("invalid parameter")
 	ErrNameResolution = errors.New("could not resolve destination")
+
+	serOptions = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
 )
 
 func main() {
@@ -48,18 +53,18 @@ func ping(destinationAddress [4]byte, payloadLen int, count int, sleepDuration t
 	if err != nil {
 		return err
 	}
-	destAddress := SockaddrInet4{
+	buf := make([]byte, 1500)
+	id := uint16(rand.Int())
+	destination := SockaddrInet4{
 		Addr: destinationAddress,
 	}
-	buf := make([]byte, 1500)
-	id := rand.Int()
 	for i := 0; i < count; i++ {
-		sendTime := time.Now()
-		packet, err := generateEchoRequest(payloadLen, uint16(id), uint16(i)+1)
+		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
 			return err
 		}
-		err = Sendto(fd, packet, 0, &destAddress)
+		sendTime := time.Now()
+		err = Sendto(fd, packet, 0, &destination)
 		if err != nil {
 			return err
 		}
@@ -88,33 +93,27 @@ func resolveIPv4(name string) (address [4]byte, err error) {
 }
 
 func parseArgs() (dest string, payloadSize int, count int, sleepDuration time.Duration, err error) {
-	dest = ""
-	payloadSize = defaultPayloadSize
+	dest, payloadSize, count, sleepDuration = "", defaultPayloadSize, defaultCount, defaultInterval
 	argCount := len(os.Args)
 	if argCount < 2 {
-		return "", defaultPayloadSize, defaultCount, defaultSleep, ErrShowUsage
+		return
 	}
-
 	dest = os.Args[argCount-1]
-	for i := 1; i < argCount-1; i++ {
-		currentArg := os.Args[i]
-		if currentArg[0] == '-' {
-			switch currentArg[1] {
+	for i := 1; i < argCount-1 && err == nil; i++ {
+		if os.Args[i][0] == '-' {
+			switch os.Args[i][1] {
 			case 's':
-				if payloadSize, err = parseIntNumericArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
+				if payloadSize, err = parseIntArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
 					err = ErrBadParameter
-					return
 				}
 			case 'c':
-				if count, err = parseIntNumericArgument(i, argCount); err != nil || count <= 0 {
+				if count, err = parseIntArgument(i, argCount); err != nil || count <= 0 {
 					err = ErrBadParameter
-					return
 				}
 			case 'i':
-				floatInterval, e := parseFloatNumericArgument(i, argCount)
+				floatInterval, e := parseFloatArgument(i, argCount)
 				if e != nil || floatInterval <= 0 || floatInterval > 60 {
 					err = ErrBadParameter
-					return
 				}
 				sleepDuration = time.Duration(float64(time.Second) * floatInterval)
 			default:
@@ -125,26 +124,24 @@ func parseArgs() (dest string, payloadSize int, count int, sleepDuration time.Du
 	return
 }
 
-func parseIntNumericArgument(index, argCount int) (value int, err error) {
+func parseIntArgument(index, argCount int) (value int, err error) {
+	value, err = 0, ErrShowUsage
 	if index+1 < argCount-1 {
-		value, err = strconv.Atoi(os.Args[index+1])
-		if err != nil {
+		if value, err = strconv.Atoi(os.Args[index+1]); err != nil {
 			err = ErrBadParameter
 		}
-		return
 	}
-	return 0, ErrShowUsage
+	return
 }
 
-func parseFloatNumericArgument(index, argCount int) (value float64, err error) {
+func parseFloatArgument(index, argCount int) (value float64, err error) {
+	value, err = 0, ErrShowUsage
 	if index+1 < argCount-1 {
-		value, err = strconv.ParseFloat(os.Args[index+1], 32)
-		if err != nil {
+		if value, err = strconv.ParseFloat(os.Args[index+1], 32); err != nil {
 			err = ErrBadParameter
 		}
-		return
 	}
-	return 0, ErrShowUsage
+	return
 }
 
 func parseAndPrintICMPv4(buf []byte, rtt float32) {
@@ -159,20 +156,17 @@ func parseAndPrintICMPv4(buf []byte, rtt float32) {
 }
 
 func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error) {
-	icmp := &layers.ICMPv4{
+	payload := make([]byte, payloadLen)
+	_, err = rand.Read(payload)
+	sbuf := gopacket.NewSerializeBuffer()
+	if err != nil {
+		return
+	}
+	icmp := layers.ICMPv4{
 		TypeCode: 0x0800,
 		Id:       id,
 		Seq:      seq,
 	}
-	sbuf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-	payload := make([]byte, payloadLen)
-	for i := 0; i < payloadLen; i++ {
-		payload[i] = byte(rand.Int())
-	}
-	err = gopacket.SerializeLayers(sbuf, opts, icmp, gopacket.Payload(payload))
+	err = gopacket.SerializeLayers(sbuf, serOptions, &icmp, gopacket.Payload(payload))
 	return sbuf.Bytes(), err
 }

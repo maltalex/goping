@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"golang.org/x/sys/windows"
 	"math/rand"
 	"net"
 	"os"
@@ -16,6 +17,7 @@ const (
 	usage              = `Usage: [-c count] [-s payload size] <destination>`
 	defaultPayloadSize = 56
 	defaultCount       = 4
+	defaultTTL         = 64
 	defaultInterval    = 1 * time.Second
 )
 
@@ -32,7 +34,7 @@ var (
 )
 
 func main() {
-	dest, payloadLen, count, sleepDuration, err := parseArgs()
+	dest, payloadLen, count, ttl, sleepDuration, err := parseArgs()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
 		os.Exit(-1)
@@ -42,14 +44,19 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
 		os.Exit(-2)
 	}
-	if err := ping(destinationAddress, payloadLen, count, sleepDuration); err != nil {
+	if err := ping(destinationAddress, payloadLen, count, ttl, sleepDuration); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
-func ping(destinationAddress [4]byte, payloadLen int, count int, sleepDuration time.Duration) error {
+func ping(destinationAddress [4]byte, payloadLen, count, ttl int, sleepDuration time.Duration) error {
 	fd, err := Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)
+	if err != nil {
+		return err
+	}
+	var ttl8 uint8 = uint8(ttl)
+	err = windows.Setsockopt(windows.Handle(fd), windows.IPPROTO_IP, windows.IP_TTL, &ttl8, 1)
 	if err != nil {
 		return err
 	}
@@ -92,8 +99,8 @@ func resolveIPv4(name string) (address [4]byte, err error) {
 	return
 }
 
-func parseArgs() (dest string, payloadSize int, count int, sleepDuration time.Duration, err error) {
-	dest, payloadSize, count, sleepDuration = "", defaultPayloadSize, defaultCount, defaultInterval
+func parseArgs() (dest string, payloadSize, count, ttl int, sleepDuration time.Duration, err error) {
+	dest, payloadSize, count, ttl, sleepDuration = "", defaultPayloadSize, defaultCount, defaultTTL, defaultInterval
 	argCount := len(os.Args)
 	if argCount < 2 {
 		return
@@ -106,8 +113,12 @@ func parseArgs() (dest string, payloadSize int, count int, sleepDuration time.Du
 				if payloadSize, err = parseIntArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
 					err = ErrBadParameter
 				}
+			case 't':
+				if ttl, err = parseIntArgument(i, argCount); ttl < 1 || ttl > 255 {
+					err = ErrBadParameter
+				}
 			case 'c':
-				if count, err = parseIntArgument(i, argCount); err != nil || count <= 0 {
+				if count, err = parseIntArgument(i, argCount); err != nil || count < 1 {
 					err = ErrBadParameter
 				}
 			case 'i':

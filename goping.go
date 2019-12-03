@@ -16,6 +16,7 @@ const (
 	usage              = `Usage: [-c count] [-s payload size] <destination>`
 	defaultPayloadSize = 56
 	defaultCount       = 4
+	defaultSleep       = 1 * time.Second
 )
 
 var (
@@ -26,7 +27,7 @@ var (
 )
 
 func main() {
-	dest, payloadLen, count, err := parseArgs()
+	dest, payloadLen, count, sleepDuration, err := parseArgs()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
 		os.Exit(-1)
@@ -36,13 +37,13 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
 		os.Exit(-2)
 	}
-	if err := ping(destinationAddress, payloadLen, count); err != nil {
+	if err := ping(destinationAddress, payloadLen, count, sleepDuration); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
-func ping(destinationAddress [4]byte, payloadLen int, count int) error {
+func ping(destinationAddress [4]byte, payloadLen int, count int, sleepDuration time.Duration) error {
 	fd, err := Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)
 	if err != nil {
 		return err
@@ -68,7 +69,7 @@ func ping(destinationAddress [4]byte, payloadLen int, count int) error {
 		}
 		rtt := float32(time.Now().UnixNano()-sendTime.UnixNano()) / 1e6
 		parseAndPrintICMPv4(buf[0:n], rtt)
-		time.Sleep(1 * time.Second)
+		time.Sleep(sleepDuration)
 	}
 	return nil
 }
@@ -86,12 +87,12 @@ func resolveIPv4(name string) (address [4]byte, err error) {
 	return
 }
 
-func parseArgs() (dest string, payloadSize int, count int, err error) {
+func parseArgs() (dest string, payloadSize int, count int, sleepDuration time.Duration, err error) {
 	dest = ""
 	payloadSize = defaultPayloadSize
 	argCount := len(os.Args)
 	if argCount < 2 {
-		return "", defaultPayloadSize, defaultCount, ErrShowUsage
+		return "", defaultPayloadSize, defaultCount, defaultSleep, ErrShowUsage
 	}
 
 	dest = os.Args[argCount-1]
@@ -100,13 +101,22 @@ func parseArgs() (dest string, payloadSize int, count int, err error) {
 		if currentArg[0] == '-' {
 			switch currentArg[1] {
 			case 's':
-				if payloadSize, err = parseNumericArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
+				if payloadSize, err = parseIntNumericArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
 					err = ErrBadParameter
+					return
 				}
 			case 'c':
-				if count, err = parseNumericArgument(i, argCount); err != nil || count <= 0 {
+				if count, err = parseIntNumericArgument(i, argCount); err != nil || count <= 0 {
 					err = ErrBadParameter
+					return
 				}
+			case 'i':
+				floatInterval, e := parseFloatNumericArgument(i, argCount)
+				if e != nil || floatInterval <= 0 || floatInterval > 60 {
+					err = ErrBadParameter
+					return
+				}
+				sleepDuration = time.Duration(float64(time.Second) * floatInterval)
 			default:
 				err = ErrUnknownSwitch
 			}
@@ -115,9 +125,20 @@ func parseArgs() (dest string, payloadSize int, count int, err error) {
 	return
 }
 
-func parseNumericArgument(index, argCount int) (value int, err error) {
+func parseIntNumericArgument(index, argCount int) (value int, err error) {
 	if index+1 < argCount-1 {
 		value, err = strconv.Atoi(os.Args[index+1])
+		if err != nil {
+			err = ErrBadParameter
+		}
+		return
+	}
+	return 0, ErrShowUsage
+}
+
+func parseFloatNumericArgument(index, argCount int) (value float64, err error) {
+	if index+1 < argCount-1 {
+		value, err = strconv.ParseFloat(os.Args[index+1], 32)
 		if err != nil {
 			err = ErrBadParameter
 		}

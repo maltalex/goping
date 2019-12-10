@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"time"
-	"unsafe"
 )
 
 const (
@@ -58,10 +57,11 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 	if err != nil {
 		return err
 	}
-	var ttl8 = uint8(ttl)
-	err = windows.Setsockopt(windows.Handle(fd), windows.IPPROTO_IP, windows.IP_TTL, &ttl8, 1)
-	var timeoutMs = int64(1000 * timeoutSec)
-	err = windows.Setsockopt(windows.Handle(fd), windows.SOL_SOCKET, 0x1006, (*byte)(unsafe.Pointer(&timeoutMs)), 4)
+	err = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, windows.IP_TTL, ttl)
+	if err != nil {
+		return err
+	}
+	err = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, SO_RCVTIMEO, 1000*timeoutSec)
 	if err != nil {
 		return err
 	}

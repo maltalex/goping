@@ -14,8 +14,12 @@ import (
 )
 
 const (
-	usage              = `Usage: [-c count] [-s payload size] <destination>`
-	maxPacketSize      = 64 * 1024
+	usage = `Usage: [-c count] [-s payload size] <destination>`
+
+	minSleepBetweenPings = 10 * time.Millisecond
+	maxPacketSize        = 64 * 1024
+	minPacketSize        = 20 /*ip*/ + 8 /*icmp*/
+
 	defaultPayloadSize = 56
 	defaultCount       = -1
 	defaultTTL         = 64
@@ -36,14 +40,14 @@ var (
 )
 
 func main() {
-	dest, payloadLen, count, ttl, timeoutSec, interval, err := parseArgs()
+	destination, payloadLen, count, ttl, timeoutSec, interval, err := parseArgs()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
 		os.Exit(-1)
 	}
-	destinationAddress, err := resolveIPv4(dest)
+	destinationAddress, err := resolveIPv4(destination)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s. Error: %v", destination, err)
 		os.Exit(-2)
 	}
 	if err := ping(destinationAddress, payloadLen, count, ttl, timeoutSec, interval); err != nil {
@@ -85,17 +89,17 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 		for time.Now().Before(nextSendTime) {
 			n, _, err := Recvfrom(fd, buf, 0)
 			switch err {
-			case windows.WSAETIMEDOUT:
+			case windows.WSAETIMEDOUT: //Timeout, try again if there's time
 				break
 			case nil: //NO-OP
-			default:
+			default: //unexpected error, return
 				return err
 			}
-			if n >= 0 && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destIp, sendTime) {
+			if n >= minPacketSize && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destIp, sendTime) {
 				break // some other ICMP
 			}
 		}
-		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval.Microseconds() > 0 {
+		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
 			time.Sleep(sleepToNextInterval)
 		}
 	}

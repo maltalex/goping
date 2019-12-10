@@ -77,10 +77,11 @@ func (rsa *RawSockaddrAny) Sockaddr() (Sockaddr, error) {
 func Recvfrom(fd Handle, p []byte, flags int) (n int, from Sockaddr, err error) {
 	var rsa RawSockaddrAny
 	l := int(unsafe.Sizeof(rsa))
-	n, err = recvfrom(fd, p, flags, &rsa, &l)
-	if err != nil {
-		return
+	n32, e := recvfrom(fd, p, flags, &rsa, &l)
+	if e != nil {
+		return -1, nil, e
 	}
+	n = int(n32)
 	from, err = rsa.Sockaddr()
 	return
 }
@@ -109,13 +110,13 @@ func sendto(s Handle, buf []byte, flags int, to unsafe.Pointer, tolen int32) (er
 	return
 }
 
-func recvfrom(s Handle, buf []byte, flags int, from *RawSockaddrAny, fromlen *int) (n int, err error) {
+func recvfrom(s Handle, buf []byte, flags int, from *RawSockaddrAny, fromlen *int) (n int32, err error) {
 	var _p0 *byte
 	if len(buf) > 0 {
 		_p0 = &buf[0]
 	}
 	r0, _, e1 := syscall.Syscall6(procrecvfrom, 6, uintptr(s), uintptr(unsafe.Pointer(_p0)), uintptr(len(buf)), uintptr(flags), uintptr(unsafe.Pointer(from)), uintptr(unsafe.Pointer(fromlen)))
-	n = int(r0)
+	n = int32(r0)
 	if n == -1 {
 		if e1 != 0 {
 			err = errnoErr(e1)

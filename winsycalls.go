@@ -8,9 +8,17 @@ import (
 const (
 	InvalidHandle         = ^Handle(0)
 	errnoERROR_IO_PENDING = 997
-	AF_INET               = 2
-	SOCK_RAW              = 3
-	IPPROTO_ICMP          = 1
+	SOCK_RAW              = 3 /* raw-protocol interface */
+	AF_INET               = 2 /* internetwork: UDP, TCP, etc. */
+
+	IPPROTO_IP   = 0   /* dummy for IP */
+	IPPROTO_ICMP = 1   /* control message protocol */
+	IPPROTO_IGMP = 2   /* group management protocol */
+	IPPROTO_TCP  = 6   /* tcp */
+	IPPROTO_UDP  = 17  /* user datagram protocol */
+	IPPROTO_RAW  = 255 /* raw IP packet */
+
+	SO_RCVTIMEO = 0x1006 /* receive timeout */
 )
 
 var (

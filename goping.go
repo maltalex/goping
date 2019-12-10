@@ -11,13 +11,16 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"unsafe"
 )
 
 const (
 	usage              = `Usage: [-c count] [-s payload size] <destination>`
+	maxPacketSize      = 64 * 1024
 	defaultPayloadSize = 56
-	defaultCount       = 4
+	defaultCount       = -1
 	defaultTTL         = 64
+	defaultTimeoutSec  = 1
 	defaultInterval    = 1 * time.Second
 )
 
@@ -34,7 +37,7 @@ var (
 )
 
 func main() {
-	dest, payloadLen, count, ttl, sleepDuration, err := parseArgs()
+	dest, payloadLen, count, ttl, timeoutSec, interval, err := parseArgs()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
 		os.Exit(-1)
@@ -44,44 +47,57 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s", dest)
 		os.Exit(-2)
 	}
-	if err := ping(destinationAddress, payloadLen, count, ttl, sleepDuration); err != nil {
+	if err := ping(destinationAddress, payloadLen, count, ttl, timeoutSec, interval); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
-func ping(destinationAddress [4]byte, payloadLen, count, ttl int, sleepDuration time.Duration) error {
+func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
 	fd, err := Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)
 	if err != nil {
 		return err
 	}
-	var ttl8 uint8 = uint8(ttl)
+	var ttl8 = uint8(ttl)
 	err = windows.Setsockopt(windows.Handle(fd), windows.IPPROTO_IP, windows.IP_TTL, &ttl8, 1)
+	var timeoutMs = int64(1000 * timeoutSec)
+	err = windows.Setsockopt(windows.Handle(fd), windows.SOL_SOCKET, 0x1006, (*byte)(unsafe.Pointer(&timeoutMs)), 4)
 	if err != nil {
 		return err
 	}
-	buf := make([]byte, 1500)
+	buf := make([]byte, maxPacketSize)
 	id := uint16(rand.Int())
 	destination := SockaddrInet4{
 		Addr: destinationAddress,
 	}
-	for i := 0; i < count; i++ {
+	destIp := net.IPv4(destinationAddress[0], destinationAddress[1], destinationAddress[2], destinationAddress[3])
+	for i := 0; count < 0 || i < count; i++ {
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
 			return err
 		}
 		sendTime := time.Now()
+		nextSendTime := sendTime.Add(interval)
 		err = Sendto(fd, packet, 0, &destination)
 		if err != nil {
 			return err
 		}
-		n, _, err := Recvfrom(fd, buf, 0)
-		if err != nil {
-			return err
+		for time.Now().Before(nextSendTime) {
+			n, _, err := Recvfrom(fd, buf, 0)
+			switch err {
+			case windows.WSAETIMEDOUT:
+				break
+			case nil: //NO-OP
+			default:
+				return err
+			}
+			if n >= 0 && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destIp, sendTime) {
+				break // some other ICMP
+			}
 		}
-		rtt := float32(time.Now().UnixNano()-sendTime.UnixNano()) / 1e6
-		parseAndPrintICMPv4(buf[0:n], rtt)
-		time.Sleep(sleepDuration)
+		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval.Microseconds() > 0 {
+			time.Sleep(sleepToNextInterval)
+		}
 	}
 	return nil
 }
@@ -99,8 +115,8 @@ func resolveIPv4(name string) (address [4]byte, err error) {
 	return
 }
 
-func parseArgs() (dest string, payloadSize, count, ttl int, sleepDuration time.Duration, err error) {
-	dest, payloadSize, count, ttl, sleepDuration = "", defaultPayloadSize, defaultCount, defaultTTL, defaultInterval
+func parseArgs() (dest string, payloadSize, count, ttl, timeoutSec int, interval time.Duration, err error) {
+	dest, payloadSize, count, ttl, timeoutSec, interval = "", defaultPayloadSize, defaultCount, defaultTTL, defaultTimeoutSec, defaultInterval
 	argCount := len(os.Args)
 	if argCount < 2 {
 		return
@@ -121,12 +137,16 @@ func parseArgs() (dest string, payloadSize, count, ttl int, sleepDuration time.D
 				if count, err = parseIntArgument(i, argCount); err != nil || count < 1 {
 					err = ErrBadParameter
 				}
+			case 'W':
+				if timeoutSec, err = parseIntArgument(i, argCount); err != nil || timeoutSec < 1 {
+					err = ErrBadParameter
+				}
 			case 'i':
 				floatInterval, e := parseFloatArgument(i, argCount)
 				if e != nil || floatInterval <= 0 || floatInterval > 60 {
 					err = ErrBadParameter
 				}
-				sleepDuration = time.Duration(float64(time.Second) * floatInterval)
+				interval = time.Duration(float64(time.Second) * floatInterval)
 			default:
 				err = ErrUnknownSwitch
 			}
@@ -155,15 +175,27 @@ func parseFloatArgument(index, argCount int) (value float64, err error) {
 	return
 }
 
-func parseAndPrintICMPv4(buf []byte, rtt float32) {
+func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, sendTime time.Time) bool {
 	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
+		if !ip.SrcIP.Equal(expectedSource) {
+			return false
+		}
 		if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
 			icmp, _ := icmpLayer.(*layers.ICMPv4)
+			if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 {
+				return false
+			}
+			if icmp.Seq != expectedSeq && icmp.Id != expectedId {
+				return false
+			}
+			rtt := float64(time.Now().Sub(sendTime).Microseconds()) / 1000
 			fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n", ip.Length-uint16(ip.IHL)*4, ip.SrcIP, icmp.Seq, ip.TTL, rtt)
+			return true
 		}
 	}
+	return false
 }
 
 func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error) {

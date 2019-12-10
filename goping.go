@@ -184,10 +184,10 @@ func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSou
 		}
 		if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
 			icmp, _ := icmpLayer.(*layers.ICMPv4)
-			if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 {
+			if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 { //Echo Reply
 				return false
 			}
-			if icmp.Seq != expectedSeq && icmp.Id != expectedId {
+			if icmp.Seq != expectedSeq || icmp.Id != expectedId {
 				return false
 			}
 			rtt := float64(time.Now().Sub(sendTime).Microseconds()) / 1000
@@ -206,7 +206,7 @@ func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error)
 		return
 	}
 	icmp := layers.ICMPv4{
-		TypeCode: 0x0800,
+		TypeCode: 0x0800, //echo request
 		Id:       id,
 		Seq:      seq,
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -9,48 +10,50 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"strconv"
 	"time"
 )
 
 const (
-	usage = `Usage: [-c count] [-s payload size] <destination>`
-
 	minSleepBetweenPings = 10 * time.Millisecond
 	maxPacketSize        = 64 * 1024
 	minPacketSize        = 20 /*ip*/ + 8 /*icmp*/
 
-	defaultPayloadSize = 56
-	defaultCount       = -1
-	defaultTTL         = 64
-	defaultTimeoutSec  = 1
-	defaultInterval    = 1 * time.Second
+	usage = "Usage: goping [options] <destination>"
 )
 
 var (
-	ErrUnknownSwitch  = errors.New("unknown switch")
-	ErrShowUsage      = errors.New("bad command line arguments")
-	ErrBadParameter   = errors.New("invalid parameter")
 	ErrNameResolution = errors.New("could not resolve destination")
 
 	serOptions = gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
+
+	timeoutParam  = flag.Int("W", 1, "Timeout, in seconds")
+	intervalParam = flag.Float64("i", 1, "Interval between pings, in seconds")
+	countParam    = flag.Int("c", -1, "Number of pings to send")
+	ttlParam      = flag.Int("t", 64, "TTL")
+	sizeParam     = flag.Int("s", 56, "Payload size")
 )
 
 func main() {
-	destination, payloadLen, count, ttl, timeoutSec, interval, err := parseArgs()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "%v\n%s", err, usage)
+	flag.Parse()
+	if flag.NArg() != 1 ||
+		*timeoutParam <= 0 ||
+		*intervalParam < 0.2 ||
+		*ttlParam <= 0 || *ttlParam > 255 ||
+		*sizeParam < 0 || *sizeParam > maxPacketSize-minPacketSize {
+		fmt.Println(usage)
+		flag.PrintDefaults()
 		os.Exit(-1)
 	}
+	destination := flag.Arg(0)
 	destinationAddress, err := resolveIPv4(destination)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s. Error: %v", destination, err)
 		os.Exit(-2)
 	}
-	if err := ping(destinationAddress, payloadLen, count, ttl, timeoutSec, interval); err != nil {
+	if err := ping(destinationAddress, *sizeParam, *countParam, *ttlParam, *timeoutParam, time.Duration(float64(time.Second)*(*intervalParam))); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
 		os.Exit(-3)
 	}
@@ -110,66 +113,6 @@ func resolveIPv4(name string) (address [4]byte, err error) {
 	ipLen := len(res.IP)
 	for i := 0; i < 4; i++ {
 		address[i] = res.IP[ipLen-4+i]
-	}
-	return
-}
-
-func parseArgs() (dest string, payloadSize, count, ttl, timeoutSec int, interval time.Duration, err error) {
-	dest, payloadSize, count, ttl, timeoutSec, interval = "", defaultPayloadSize, defaultCount, defaultTTL, defaultTimeoutSec, defaultInterval
-	argCount := len(os.Args)
-	if argCount < 2 {
-		return
-	}
-	dest = os.Args[argCount-1]
-	for i := 1; i < argCount-1 && err == nil; i++ {
-		if os.Args[i][0] == '-' {
-			switch os.Args[i][1] {
-			case 's':
-				if payloadSize, err = parseIntArgument(i, argCount); payloadSize < 0 || payloadSize > 16*1024-8 {
-					err = ErrBadParameter
-				}
-			case 't':
-				if ttl, err = parseIntArgument(i, argCount); ttl < 1 || ttl > 255 {
-					err = ErrBadParameter
-				}
-			case 'c':
-				if count, err = parseIntArgument(i, argCount); err != nil || count < 1 {
-					err = ErrBadParameter
-				}
-			case 'W':
-				if timeoutSec, err = parseIntArgument(i, argCount); err != nil || timeoutSec < 1 {
-					err = ErrBadParameter
-				}
-			case 'i':
-				floatInterval, e := parseFloatArgument(i, argCount)
-				if e != nil || floatInterval <= 0 || floatInterval > 60 {
-					err = ErrBadParameter
-				}
-				interval = time.Duration(float64(time.Second) * floatInterval)
-			default:
-				err = ErrUnknownSwitch
-			}
-		}
-	}
-	return
-}
-
-func parseIntArgument(index, argCount int) (value int, err error) {
-	value, err = 0, ErrShowUsage
-	if index+1 < argCount-1 {
-		if value, err = strconv.Atoi(os.Args[index+1]); err != nil {
-			err = ErrBadParameter
-		}
-	}
-	return
-}
-
-func parseFloatArgument(index, argCount int) (value float64, err error) {
-	value, err = 0, ErrShowUsage
-	if index+1 < argCount-1 {
-		if value, err = strconv.ParseFloat(os.Args[index+1], 32); err != nil {
-			err = ErrBadParameter
-		}
 	}
 	return
 }

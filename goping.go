@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"golang.org/x/sys/windows"
+	"github.com/maltalex/goping/pingsocket"
 	"math/rand"
 	"net"
 	"os"
@@ -57,23 +57,18 @@ func main() {
 }
 
 func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
-	fd, err := Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)
+	socket, err := pingsocket.NewIPv4()
 	if err != nil {
 		return err
 	}
-	err = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, windows.IP_TTL, ttl)
-	if err != nil {
+	if err = socket.SetTTL(uint8(ttl)); err != nil {
 		return err
 	}
-	err = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, SO_RCVTIMEO, 1000*timeoutSec)
-	if err != nil {
+	if err = socket.SetReadTimeout(time.Duration(timeoutSec) * time.Second); err != nil {
 		return err
 	}
 	buf := make([]byte, maxPacketSize)
 	id := uint16(rand.Int())
-	destination := SockaddrInet4{
-		Addr: destinationAddress,
-	}
 	destIp := net.IPv4(destinationAddress[0], destinationAddress[1], destinationAddress[2], destinationAddress[3])
 	for i := 0; count < 0 || i < count; i++ {
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
@@ -82,14 +77,14 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 		}
 		sendTime := time.Now()
 		nextSendTime := sendTime.Add(interval)
-		err = Sendto(fd, packet, 0, &destination)
+		err = socket.SendTo(packet, destinationAddress)
 		if err != nil {
 			return err
 		}
 		for time.Now().Before(nextSendTime) {
-			n, _, err := Recvfrom(fd, buf, 0)
+			n, _, err := socket.Recvfrom(buf)
 			switch err {
-			case windows.WSAETIMEDOUT: //Timeout, try again if there's time
+			case pingsocket.TIMEOUTERR: //Timeout, try again if there's time
 				break
 			case nil: //NO-OP
 			default: //unexpected error, return

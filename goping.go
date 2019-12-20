@@ -6,9 +6,11 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/maltalex/goping/pingsocket"
+	"math"
 	"math/rand"
 	"net"
 	"os"
+	"os/signal"
 	"time"
 )
 
@@ -51,14 +53,22 @@ func main() {
 		os.Exit(-2)
 	}
 	destinationIp := destinationAddress.IP
-	fmt.Printf("PING %v (%v) %v(%v) bytes of data.\n", destinationParam, destinationIp, *sizeParam, *sizeParam+minPacketSize)
-	if err := pingIpv4(destinationIp, *sizeParam, *countParam, *ttlParam, *timeoutParam, time.Duration(float64(time.Second)*(*intervalParam))); err != nil {
+	fmt.Printf("PING %v (%v) %v(%v) bytes of data.\n",
+		destinationParam,
+		destinationIp,
+		*sizeParam,
+		*sizeParam+minPacketSize)
+	interval := time.Duration(float64(time.Second) * (*intervalParam))
+	if err := pingIpv4(destinationIp, *sizeParam, *countParam, *ttlParam, *timeoutParam, interval); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute pingIpv4. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
 func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
+	interruptChannel := make(chan os.Signal, 1)
+	signal.Notify(interruptChannel, os.Interrupt)
+
 	socket, err := pingsocket.NewIPv4()
 	if err != nil {
 		return err
@@ -71,7 +81,15 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 	}
 	buf := make([]byte, maxPacketSize)
 	id := uint16(rand.Int())
+	stats := pingStats{}
+	startTime := time.Now()
+LOOP:
 	for i := 0; count < 0 || i < count; i++ {
+		select {
+		case <-interruptChannel:
+			break LOOP //Interrupted, break loop
+		default:
+		}
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
 			return err
@@ -82,27 +100,32 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 		if err != nil {
 			return err
 		}
+		stats.sent()
 		for time.Now().Before(nextSendTime) {
 			n, _, err := socket.Recvfrom(buf)
 			switch err {
 			case pingsocket.TIMEOUTERR: //Timeout, try again if there's time
-				break
+				continue
 			case nil: //NO-OP
 			default: //unexpected error, return
 				return err
 			}
-			if n >= minPacketSize && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destinationIp, sendTime) {
-				break // some other ICMP
+			rtt := time.Now().Sub(sendTime)
+			if n >= minPacketSize && n <= maxPacketSize &&
+				parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destinationIp, rtt) {
+				stats.received(rtt)
+				break
 			}
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
 			time.Sleep(sleepToNextInterval)
 		}
 	}
+	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
 }
 
-func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, sendTime time.Time) bool {
+func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, rtt time.Duration) bool {
 	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
@@ -117,8 +140,13 @@ func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSou
 			if icmp.Seq != expectedSeq || icmp.Id != expectedId {
 				return false
 			}
-			rtt := float64(time.Now().Sub(sendTime).Microseconds()) / 1000
-			fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n", ip.Length-uint16(ip.IHL)*4, ip.SrcIP, icmp.Seq, ip.TTL, rtt)
+			fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
+				ip.Length-uint16(ip.IHL)*4,
+				ip.SrcIP,
+				icmp.Seq,
+				ip.TTL,
+				float64(rtt.Microseconds())/1000,
+			)
 			return true
 		}
 	}
@@ -139,4 +167,44 @@ func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error)
 	}
 	err = gopacket.SerializeLayers(sbuf, serOptions, &icmp, gopacket.Payload(payload))
 	return sbuf.Bytes(), err
+}
+
+type pingStats struct {
+	nsent, nreceived                 int
+	rttMin, rttMax, rttSum, rttSumSq float64
+}
+
+func (ps *pingStats) received(rtt time.Duration) {
+	rttMillis := float64(rtt.Microseconds()) / 1000
+	if ps.nreceived == 0 || ps.rttMax < rttMillis {
+		ps.rttMax = rttMillis
+	}
+	if ps.nreceived == 0 || ps.rttMin > rttMillis {
+		ps.rttMin = rttMillis
+	}
+	ps.nreceived++
+	ps.rttSum += rttMillis
+	ps.rttSumSq += rttMillis * rttMillis
+}
+
+func (ps *pingStats) sent() {
+	ps.nsent++
+}
+
+func (ps *pingStats) stats(totalTime time.Duration) string {
+	nreceived := float64(ps.nreceived)
+	packetLoss := 100.0 * (ps.nsent - ps.nreceived) / ps.nsent
+	rttAvg := ps.rttSum / nreceived
+	rttStdDev := math.Sqrt(ps.rttSumSq/nreceived - (ps.rttSum/nreceived)*(ps.rttSum/nreceived))
+	return fmt.Sprintf("%v packets transmitted, %v received, %v%% packet loss, time %vms\n"+
+		"rtt min/avg/max/mdev = %2.3f/%2.3f/%2.3f/%2.3f ms\n",
+		ps.nsent,
+		ps.nreceived,
+		packetLoss,
+		totalTime.Milliseconds(),
+		ps.rttMin,
+		rttAvg,
+		ps.rttMax,
+		rttStdDev,
+	)
 }

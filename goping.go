@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"github.com/google/gopacket"
@@ -22,8 +21,6 @@ const (
 )
 
 var (
-	ErrNameResolution = errors.New("could not resolve destination")
-
 	serOptions = gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
@@ -47,19 +44,21 @@ func main() {
 		flag.PrintDefaults()
 		os.Exit(-1)
 	}
-	destination := flag.Arg(0)
-	destinationAddress, err := resolveIPv4(destination)
+	destinationParam := flag.Arg(0)
+	destinationAddress, err := net.ResolveIPAddr("ip4", destinationParam)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destination %s. Error: %v", destination, err)
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destinationParam %s. Error: %v", destinationParam, err)
 		os.Exit(-2)
 	}
-	if err := ping(destinationAddress, *sizeParam, *countParam, *ttlParam, *timeoutParam, time.Duration(float64(time.Second)*(*intervalParam))); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute ping. Error: %v", err)
+	destinationIp := destinationAddress.IP
+	fmt.Printf("PING %v (%v) %v(%v) bytes of data.\n", destinationParam, destinationIp, *sizeParam, *sizeParam+minPacketSize)
+	if err := pingIpv4(destinationIp, *sizeParam, *countParam, *ttlParam, *timeoutParam, time.Duration(float64(time.Second)*(*intervalParam))); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute pingIpv4. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
-func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
+func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
 	socket, err := pingsocket.NewIPv4()
 	if err != nil {
 		return err
@@ -72,7 +71,6 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 	}
 	buf := make([]byte, maxPacketSize)
 	id := uint16(rand.Int())
-	destIp := net.IPv4(destinationAddress[0], destinationAddress[1], destinationAddress[2], destinationAddress[3])
 	for i := 0; count < 0 || i < count; i++ {
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
@@ -80,7 +78,7 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 		}
 		sendTime := time.Now()
 		nextSendTime := sendTime.Add(interval)
-		err = socket.SendTo(packet, destinationAddress)
+		err = socket.SendTo(packet, destinationIp)
 		if err != nil {
 			return err
 		}
@@ -93,7 +91,7 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 			default: //unexpected error, return
 				return err
 			}
-			if n >= minPacketSize && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destIp, sendTime) {
+			if n >= minPacketSize && n <= maxPacketSize && parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destinationIp, sendTime) {
 				break // some other ICMP
 			}
 		}
@@ -102,19 +100,6 @@ func ping(destinationAddress [4]byte, payloadLen, count, ttl, timeoutSec int, in
 		}
 	}
 	return nil
-}
-
-func resolveIPv4(name string) (address [4]byte, err error) {
-	res, err := net.ResolveIPAddr("ip4", name)
-	if err != nil || res.IP.To4() == nil {
-		err = ErrNameResolution
-		return
-	}
-	ipLen := len(res.IP)
-	for i := 0; i < 4; i++ {
-		address[i] = res.IP[ipLen-4+i]
-	}
-	return
 }
 
 func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, sendTime time.Time) bool {

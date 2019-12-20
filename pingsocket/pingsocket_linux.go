@@ -1,12 +1,18 @@
 package pingsocket
 
 import (
+	"errors"
 	"golang.org/x/sys/unix"
+	"net"
 	"time"
 )
 
 const (
 	TIMEOUTERR = unix.EWOULDBLOCK
+)
+
+var (
+	ErrNotIPV4 = errors.New("the given address is not IPv4")
 )
 
 type IPv4 struct {
@@ -23,18 +29,17 @@ func (s IPv4) SetTTL(ttl uint8) error {
 }
 
 func (s IPv4) SetReadTimeout(duration time.Duration) error {
-	tv := unix.Timeval{
-		Sec:  int64(duration.Seconds()),
-		Usec: 0,
-	}
 	//TODO check sanity of incoming value
-	return unix.SetsockoptTimeval(s.socket, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+	return unix.SetsockoptTimeval(s.socket, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: int64(duration.Seconds())})
 }
 
-func (s IPv4) SendTo(packet []byte, destination [4]byte) error {
-	dest := unix.SockaddrInet4{
-		Port: 0,
-		Addr: destination,
+func (s IPv4) SendTo(packet []byte, destination net.IP) error {
+	if destination.To4() == nil {
+		return ErrNotIPV4
+	}
+	var dest unix.SockaddrInet4
+	for i := 0; i < 4; i++ {
+		dest.Addr[i] = destination[len(destination)-4+i]
 	}
 	return unix.Sendto(s.socket, packet, 0, &dest)
 }

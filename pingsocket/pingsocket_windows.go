@@ -1,12 +1,18 @@
 package pingsocket
 
 import (
+	"errors"
 	"golang.org/x/sys/windows"
+	"net"
 	"time"
 )
 
 const (
 	TIMEOUTERR = windows.WSAETIMEDOUT
+)
+
+var (
+	ErrNotIPV4 = errors.New("the given address is not IPv4")
 )
 
 type IPv4 struct {
@@ -27,10 +33,13 @@ func (s IPv4) SetReadTimeout(duration time.Duration) error {
 	return windows.SetsockoptInt(s.socket, windows.SOL_SOCKET, windows.SO_RCVTIMEO, int(duration.Milliseconds()))
 }
 
-func (s IPv4) SendTo(packet []byte, destination [4]byte) error {
-	dest := windows.SockaddrInet4{
-		Port: 0,
-		Addr: destination,
+func (s IPv4) SendTo(packet []byte, destination net.IP) error {
+	if destination.To4() == nil {
+		return ErrNotIPV4
+	}
+	var dest windows.SockaddrInet4
+	for i := 0; i < 4; i++ {
+		dest.Addr[i] = destination[len(destination)-4+i]
 	}
 	return windows.Sendto(s.socket, packet, 0, &dest)
 }

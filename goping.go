@@ -197,7 +197,7 @@ func (ps *pingStats) stats(totalTime time.Duration) string {
 	rttAvg := ps.rttSum / nreceived
 	rttStdDev := math.Sqrt(ps.rttSumSq/nreceived - (ps.rttSum/nreceived)*(ps.rttSum/nreceived))
 	return fmt.Sprintf("%v packets transmitted, %v received, %v%% packet loss, time %vms\n"+
-		"rtt min/avg/max/mdev = %2.3f/%2.3f/%2.3f/%2.3f ms\n",
+		"rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
 		ps.nsent,
 		ps.nreceived,
 		packetLoss,

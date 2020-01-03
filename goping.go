@@ -83,8 +83,8 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 	id := uint16(rand.Int())
 	stats := pingStats{}
 	startTime := time.Now()
-	recvResultChan := make(chan recvFromResult)
-	startRecvChan := make(chan bool, 1)
+	recvResultChan := make(chan recvFromResult, 1)
+	startRecvChan := make(chan bool)
 	go recvFrom(socket, buf, startRecvChan, recvResultChan) //start receiving goroutine
 pingIterationsLoop:
 	for i := 0; count < 0 || i < count; i++ {
@@ -106,11 +106,10 @@ pingIterationsLoop:
 			case <-interruptChannel:
 				break pingIterationsLoop //Interrupted, break loop
 			case received := <-recvResultChan:
-				switch received.err {
-				case pingsocket.TIMEOUTERR: //Timeout, try again if there's time
-					continue receiveLoop
-				case nil: //NO-OP
-				default: //unexpected error, return
+				if received.err != nil {
+					if received.err == pingsocket.TIMEOUTERR {
+						continue receiveLoop
+					}
 					return err
 				}
 				rtt := received.recvTime.Sub(sendTime)
@@ -123,7 +122,12 @@ pingIterationsLoop:
 
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
-			time.Sleep(sleepToNextInterval)
+			select {
+			case <-interruptChannel:
+				break pingIterationsLoop
+			case <-time.After(sleepToNextInterval):
+				continue pingIterationsLoop
+			}
 		}
 	}
 	close(startRecvChan)
@@ -142,6 +146,7 @@ func recvFrom(socket pingsocket.IPv4, buf []byte, signalChan chan bool, resultCh
 		n, _, err := socket.Recvfrom(buf)
 		resultChan <- recvFromResult{n, time.Now(), err}
 	}
+	close(resultChan)
 }
 
 func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, rtt time.Duration) bool {

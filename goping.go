@@ -39,7 +39,7 @@ func main() {
 	flag.Parse()
 	if flag.NArg() != 1 ||
 		*timeoutParam <= 0 ||
-		*intervalParam < 0.2 ||
+		*intervalParam < 0 ||
 		*ttlParam <= 0 || *ttlParam > 255 ||
 		*sizeParam < 0 || *sizeParam > maxPacketSize-minPacketSize {
 		fmt.Println(usage)
@@ -98,7 +98,7 @@ pingIterationsLoop:
 		}
 		stats.sent()
 	receiveLoop:
-		for time.Now().Before(nextSendTime) {
+		for {
 			recv.signalChan <- true //signal to receiver
 			select {
 			case <-interruptChannel:
@@ -130,6 +130,9 @@ pingIterationsLoop:
 						float64(rtt.Microseconds())/1000,
 					)
 				}
+			}
+			if time.Now().After(nextSendTime) {
+				break
 			}
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
@@ -234,7 +237,7 @@ func (r *receiver) start() {
 				continue
 			}
 			result := receiverResult{recvTime: time.Now()}
-			packet := gopacket.NewPacket(r.buffer[0:n], layers.LayerTypeIPv4, gopacket.Default)
+			packet := gopacket.NewPacket(r.buffer[0:n], layers.LayerTypeIPv4, gopacket.NoCopy) //Nocopy! Buffer reused
 			if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 				ip, _ := ipLayer.(*layers.IPv4)
 				result.ipv4 = ip

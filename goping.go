@@ -83,13 +83,11 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 	id := uint16(rand.Int())
 	stats := pingStats{}
 	startTime := time.Now()
-LOOP:
+	recvResultChan := make(chan recvFromResult)
+	startRecvChan := make(chan bool, 1)
+	go recvFrom(socket, buf, startRecvChan, recvResultChan) //start receiving goroutine
+pingIterationsLoop:
 	for i := 0; count < 0 || i < count; i++ {
-		select {
-		case <-interruptChannel:
-			break LOOP //Interrupted, break loop
-		default:
-		}
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
 			return err
@@ -101,28 +99,49 @@ LOOP:
 			return err
 		}
 		stats.sent()
+	receiveLoop:
 		for time.Now().Before(nextSendTime) {
-			n, _, err := socket.Recvfrom(buf)
-			switch err {
-			case pingsocket.TIMEOUTERR: //Timeout, try again if there's time
-				continue
-			case nil: //NO-OP
-			default: //unexpected error, return
-				return err
+			startRecvChan <- true //signal to receive goroutine
+			select {
+			case <-interruptChannel:
+				break pingIterationsLoop //Interrupted, break loop
+			case received := <-recvResultChan:
+				switch received.err {
+				case pingsocket.TIMEOUTERR: //Timeout, try again if there's time
+					continue receiveLoop
+				case nil: //NO-OP
+				default: //unexpected error, return
+					return err
+				}
+				rtt := received.recvTime.Sub(sendTime)
+				if received.n >= minPacketSize && received.n <= maxPacketSize &&
+					parseAndPrintICMPv4(buf[0:received.n], id, uint16(i)+1, destinationIp, rtt) {
+					stats.received(rtt)
+					break receiveLoop
+				}
 			}
-			rtt := time.Now().Sub(sendTime)
-			if n >= minPacketSize && n <= maxPacketSize &&
-				parseAndPrintICMPv4(buf[0:n], id, uint16(i)+1, destinationIp, rtt) {
-				stats.received(rtt)
-				break
-			}
+
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
 			time.Sleep(sleepToNextInterval)
 		}
 	}
+	close(startRecvChan)
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
+}
+
+type recvFromResult struct {
+	n        int
+	recvTime time.Time
+	err      error
+}
+
+func recvFrom(socket pingsocket.IPv4, buf []byte, signalChan chan bool, resultChan chan recvFromResult) {
+	for _ = range signalChan {
+		n, _, err := socket.Recvfrom(buf)
+		resultChan <- recvFromResult{n, time.Now(), err}
+	}
 }
 
 func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, rtt time.Duration) bool {

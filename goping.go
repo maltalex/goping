@@ -79,13 +79,11 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 	if err = socket.SetReadTimeout(time.Duration(timeoutSec) * time.Second); err != nil {
 		return err
 	}
-	buf := make([]byte, maxPacketSize)
 	id := uint16(rand.Int())
 	stats := pingStats{}
 	startTime := time.Now()
-	recvResultChan := make(chan recvFromResult, 1)
-	startRecvChan := make(chan bool)
-	go recvFrom(socket, buf, startRecvChan, recvResultChan) //start receiving goroutine
+	recv := newReceiver(socket)
+	recv.start()
 pingIterationsLoop:
 	for i := 0; count < 0 || i < count; i++ {
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
@@ -101,25 +99,38 @@ pingIterationsLoop:
 		stats.sent()
 	receiveLoop:
 		for time.Now().Before(nextSendTime) {
-			startRecvChan <- true //signal to receive goroutine
+			recv.signalChan <- true //signal to receiver
 			select {
 			case <-interruptChannel:
-				break pingIterationsLoop //Interrupted, break loop
-			case received := <-recvResultChan:
-				if received.err != nil {
-					if received.err == pingsocket.TIMEOUTERR {
+				break pingIterationsLoop //Interrupted during receive, break loop
+			case rec := <-recv.resultChan: //received something!
+				rtt := rec.recvTime.Sub(sendTime)
+				if rec.err != nil {
+					if rec.err == pingsocket.TIMEOUTERR {
 						continue receiveLoop
 					}
 					return err
 				}
-				rtt := received.recvTime.Sub(sendTime)
-				if received.n >= minPacketSize && received.n <= maxPacketSize &&
-					parseAndPrintICMPv4(buf[0:received.n], id, uint16(i)+1, destinationIp, rtt) {
+				if rec.ipv4 == nil || rec.icmp == nil {
+					continue receiveLoop
+				}
+				if !rec.ipv4.SrcIP.Equal(destinationIp) { //Check source IP
+					continue receiveLoop
+				}
+				if !(rec.icmp.TypeCode.Type() == 0 && rec.icmp.TypeCode.Code() == 0) { //ICMP echo reply
+					continue receiveLoop
+				}
+				if rec.icmp.Seq == uint16(i)+1 && rec.icmp.Id == id { //Id and seq#
 					stats.received(rtt)
-					break receiveLoop
+					fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
+						rec.ipv4.Length-uint16(rec.ipv4.IHL)*4,
+						rec.ipv4.SrcIP,
+						rec.icmp.Seq,
+						rec.ipv4.TTL,
+						float64(rtt.Microseconds())/1000,
+					)
 				}
 			}
-
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
 			select {
@@ -130,51 +141,9 @@ pingIterationsLoop:
 			}
 		}
 	}
-	close(startRecvChan)
+	recv.stop()
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
-}
-
-type recvFromResult struct {
-	n        int
-	recvTime time.Time
-	err      error
-}
-
-func recvFrom(socket pingsocket.IPv4, buf []byte, signalChan chan bool, resultChan chan recvFromResult) {
-	for _ = range signalChan {
-		n, _, err := socket.Recvfrom(buf)
-		resultChan <- recvFromResult{n, time.Now(), err}
-	}
-	close(resultChan)
-}
-
-func parseAndPrintICMPv4(buf []byte, expectedId, expectedSeq uint16, expectedSource net.IP, rtt time.Duration) bool {
-	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
-	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-		ip, _ := ipLayer.(*layers.IPv4)
-		if !ip.SrcIP.Equal(expectedSource) {
-			return false
-		}
-		if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
-			icmp, _ := icmpLayer.(*layers.ICMPv4)
-			if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 { //Echo Reply
-				return false
-			}
-			if icmp.Seq != expectedSeq || icmp.Id != expectedId {
-				return false
-			}
-			fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
-				ip.Length-uint16(ip.IHL)*4,
-				ip.SrcIP,
-				icmp.Seq,
-				ip.TTL,
-				float64(rtt.Microseconds())/1000,
-			)
-			return true
-		}
-	}
-	return false
 }
 
 func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error) {
@@ -231,4 +200,55 @@ func (ps *pingStats) stats(totalTime time.Duration) string {
 		ps.rttMax,
 		rttStdDev,
 	)
+}
+
+type receiverResult struct {
+	ipv4     *layers.IPv4
+	icmp     *layers.ICMPv4
+	recvTime time.Time
+	err      error
+}
+
+type receiver struct {
+	socket     pingsocket.IPv4
+	signalChan chan bool
+	resultChan chan receiverResult
+	buffer     []byte
+}
+
+func newReceiver(socket pingsocket.IPv4) *receiver {
+	return &receiver{
+		socket:     socket,
+		signalChan: make(chan bool),
+		resultChan: make(chan receiverResult, 1), //buffer of 1 to avoid goroutine leak
+		buffer:     make([]byte, maxPacketSize),
+	}
+}
+
+func (r *receiver) start() {
+	go func() {
+		for range r.signalChan {
+			n, _, err := r.socket.Recvfrom(r.buffer)
+			if err != nil || n < minPacketSize || n > maxPacketSize {
+				r.resultChan <- receiverResult{err: err}
+				continue
+			}
+			result := receiverResult{recvTime: time.Now()}
+			packet := gopacket.NewPacket(r.buffer[0:n], layers.LayerTypeIPv4, gopacket.Default)
+			if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+				ip, _ := ipLayer.(*layers.IPv4)
+				result.ipv4 = ip
+				if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
+					icmp, _ := icmpLayer.(*layers.ICMPv4)
+					result.icmp = icmp
+				}
+			}
+			r.resultChan <- result
+		}
+		close(r.resultChan)
+	}()
+}
+
+func (r *receiver) stop() {
+	close(r.signalChan)
 }

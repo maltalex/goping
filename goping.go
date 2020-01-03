@@ -33,6 +33,7 @@ var (
 	countParam    = flag.Int("c", -1, "Number of pings to send")
 	ttlParam      = flag.Int("t", 64, "TTL")
 	sizeParam     = flag.Int("s", 56, "Payload size")
+	quietParam    = flag.Bool("q", false, "Quiet mode")
 )
 
 func main() {
@@ -59,13 +60,13 @@ func main() {
 		*sizeParam,
 		*sizeParam+minPacketSize)
 	interval := time.Duration(float64(time.Second) * (*intervalParam))
-	if err := pingIpv4(destinationIp, *sizeParam, *countParam, *ttlParam, *timeoutParam, interval); err != nil {
+	if err := pingIpv4(destinationIp, *sizeParam, *countParam, *ttlParam, *timeoutParam, interval, *quietParam); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute pingIpv4. Error: %v", err)
 		os.Exit(-3)
 	}
 }
 
-func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, interval time.Duration) error {
+func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, interval time.Duration, quiet bool) error {
 	interruptChannel := make(chan os.Signal, 1)
 	signal.Notify(interruptChannel, os.Interrupt)
 
@@ -122,13 +123,15 @@ pingIterationsLoop:
 				}
 				if rec.icmp.Seq == uint16(i)+1 && rec.icmp.Id == id { //Id and seq#
 					stats.received(rtt)
-					fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
-						rec.ipv4.Length-uint16(rec.ipv4.IHL)*4,
-						rec.ipv4.SrcIP,
-						rec.icmp.Seq,
-						rec.ipv4.TTL,
-						float64(rtt.Microseconds())/1000,
-					)
+					if !quiet {
+						fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
+							rec.ipv4.Length-uint16(rec.ipv4.IHL)*4,
+							rec.ipv4.SrcIP,
+							rec.icmp.Seq,
+							rec.ipv4.TTL,
+							float64(rtt.Microseconds())/1000,
+						)
+					}
 				}
 			}
 			if time.Now().After(nextSendTime) {

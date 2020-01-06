@@ -85,7 +85,7 @@ func pingIpv4(destinationIp net.IP, payloadLen, count, ttl, timeoutSec int, inte
 	startTime := time.Now()
 	recv := newReceiver(socket)
 	recv.start()
-pingIterationsLoop:
+pingLoop:
 	for i := 0; count < 0 || i < count; i++ {
 		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
 		if err != nil {
@@ -98,31 +98,32 @@ pingIterationsLoop:
 			return err
 		}
 		stats.sent()
-	receiveLoop:
+		receivedResponse := false
 		for {
 			recv.signalChan <- true //signal to receiver
 			select {
 			case <-interruptChannel:
-				break pingIterationsLoop //Interrupted during receive, break loop
+				break pingLoop //Interrupted, stop pinging
 			case rec := <-recv.resultChan: //received something!
-				rtt := rec.recvTime.Sub(sendTime)
 				if rec.err != nil {
 					if rec.err == pingsocket.TIMEOUTERR {
-						continue receiveLoop
+						break
 					}
 					return err
 				}
 				if rec.ipv4 == nil || rec.icmp == nil {
-					continue receiveLoop
+					break
 				}
 				if !rec.ipv4.SrcIP.Equal(destinationIp) { //Check source IP
-					continue receiveLoop
+					break
 				}
 				if !(rec.icmp.TypeCode.Type() == 0 && rec.icmp.TypeCode.Code() == 0) { //ICMP echo reply
-					continue receiveLoop
+					break
 				}
 				if rec.icmp.Seq == uint16(i)+1 && rec.icmp.Id == id { //Id and seq#
+					rtt := rec.recvTime.Sub(sendTime)
 					stats.received(rtt)
+					receivedResponse = true
 					if !quiet {
 						fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
 							rec.ipv4.Length-uint16(rec.ipv4.IHL)*4,
@@ -134,16 +135,16 @@ pingIterationsLoop:
 					}
 				}
 			}
-			if time.Now().After(nextSendTime) {
+			if receivedResponse || interval == 0 || time.Now().After(nextSendTime) {
 				break
 			}
 		}
 		if sleepToNextInterval := nextSendTime.Sub(time.Now()); sleepToNextInterval >= minSleepBetweenPings {
 			select {
 			case <-interruptChannel:
-				break pingIterationsLoop
+				break pingLoop
 			case <-time.After(sleepToNextInterval):
-				continue pingIterationsLoop
+				continue pingLoop
 			}
 		}
 	}

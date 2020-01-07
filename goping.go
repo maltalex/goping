@@ -148,7 +148,7 @@ pingLoop:
 			}
 		}
 	}
-	recv.stop()
+	close(recv.signalChan)
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
 }
@@ -254,8 +254,4 @@ func (r *receiver) start() {
 		}
 		close(r.resultChan)
 	}()
-}
-
-func (r *receiver) stop() {
-	close(r.signalChan)
 }

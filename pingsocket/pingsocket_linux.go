@@ -44,10 +44,10 @@ func (s IPv4) SendTo(packet []byte, destination net.IP) error {
 	return unix.Sendto(s.socket, packet, 0, &dest)
 }
 
-func (s IPv4) Recvfrom(buf []byte) (n int, from [4]byte, err error) {
+func (s IPv4) Recvfrom(buf []byte) (n int, from net.IP, err error) {
 	n, sourceSock, e := unix.Recvfrom(s.socket, buf, 0)
 	if source, ok := sourceSock.(*unix.SockaddrInet4); ok {
-		return n, source.Addr, e
+		return n, net.IPv4(source.Addr[0], source.Addr[1], source.Addr[2], source.Addr[3]), e
 	}
 	return n, from, e
 }

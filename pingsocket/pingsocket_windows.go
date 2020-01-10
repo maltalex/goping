@@ -51,3 +51,7 @@ func (s IPv4) Recvfrom(buf []byte) (n int, from net.IP, err error) {
 	}
 	return n, from, e
 }
+
+func (s IPv4) Close() error {
+	return windows.Close(s.socket)
+}

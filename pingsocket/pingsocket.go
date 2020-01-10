@@ -14,6 +14,7 @@ const (
 
 type Pingsocket interface {
 	SetTTL(ttl uint8) error
+	Close() error
 	SetReadTimeout(duration time.Duration) error
 	SendTo(packet []byte, destination net.IP) error
 	Recvfrom(buf []byte) (n int, from net.IP, err error)

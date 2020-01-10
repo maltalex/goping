@@ -160,6 +160,7 @@ pingLoop:
 		}
 	}
 	close(recv.SignalChan)
+	_ = socket.Close()
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
 }

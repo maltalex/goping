@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/maltalex/goping/pingsocket"
 	"math"
 	"math/rand"
@@ -40,7 +39,7 @@ func main() {
 		*timeoutParam <= 0 ||
 		*intervalParam < 0 ||
 		*ttlParam <= 0 || *ttlParam > 255 ||
-		*sizeParam < 0 || *sizeParam > pingsocket.MaxPacketSize-pingsocket.MinPacketSize {
+		*sizeParam < 0 || *sizeParam > MaxPacketSize-MinPacketSize {
 		fmt.Println(usage)
 		flag.PrintDefaults()
 		os.Exit(-1)
@@ -51,23 +50,18 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destinationParam %s. Error: %v", destinationParam, err)
 		os.Exit(-2)
 	}
-	destinationIp := destinationAddress.IP
 	interval := time.Duration(float64(time.Second) * (*intervalParam))
 	interruptChannel := make(chan os.Signal, 1)
 	signal.Notify(interruptChannel, os.Interrupt)
-	socket, err := pingsocket.NewIPv4()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to create RAW socket. Error: %v", err)
-		os.Exit(-3)
-	}
 	fmt.Printf("PING %v (%v) %v(%v) bytes of data.\n",
 		destinationParam,
-		destinationIp,
+		destinationAddress.IP,
 		*sizeParam,
-		*sizeParam+pingsocket.MinPacketSize)
-	if err := ping(socket,
+		*sizeParam+MinPacketSize)
+
+	if err := ping(
 		interruptChannel,
-		destinationIp,
+		destinationAddress.IP,
 		*sizeParam,
 		*countParam,
 		*ttlParam,
@@ -75,76 +69,65 @@ func main() {
 		interval,
 		*quietParam); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute pingIpv4. Error: %v", err)
-		os.Exit(-4)
+		os.Exit(-3)
 	}
 }
 
-func ping(socket pingsocket.Pingsocket,
-	interruptChannel chan os.Signal,
+func ping(interruptChannel chan os.Signal,
 	destinationIp net.IP,
 	payloadLen, count, ttl, timeoutSec int,
 	interval time.Duration,
-	quiet bool) error {
+	quiet bool) (err error) {
+
+	socket, err := pingsocket.NewIPv4()
+	if err != nil {
+		return err
+	}
 	if err := socket.SetTTL(uint8(ttl)); err != nil {
 		return err
 	}
 	if err := socket.SetReadTimeout(time.Duration(timeoutSec) * time.Second); err != nil {
 		return err
 	}
-	id := uint16(rand.Int())
-	stats := pingStats{}
+	pinger := newPinger(socket, destinationIp, uint16(rand.Uint32()), payloadLen)
+	var stats pingStats
 	startTime := time.Now()
-	recv := pingsocket.NewReceiver(socket)
-	recv.Start()
+	pinger.startReceiver()
 pingLoop:
 	for i := 0; count < 0 || i < count; i++ {
-		packet, err := generateEchoRequest(payloadLen, id, uint16(i)+1)
-		if err != nil {
+		if err := pinger.send(uint16(i) + 1); err != nil {
 			return err
 		}
 		sendTime := time.Now()
 		nextSendTime := sendTime.Add(interval)
-		err = socket.SendTo(packet, destinationIp)
-		if err != nil {
-			return err
-		}
 		stats.sent()
+
 		receivedResponse := false
 		for {
-			recv.SignalChan <- true //signal to receiver
+			pinger.seqChan <- uint16(i) + 1
 			select {
 			case <-interruptChannel:
 				break pingLoop //Interrupted, stop pinging
-			case rec := <-recv.ResultChan: //received something!
-				if rec.Err != nil {
-					if rec.Err == pingsocket.TIMEOUTERR {
-						break
+			case received := <-pinger.resultChan: //received something!
+				if received.err != nil {
+					if received.err == ErrUnexpectedPacket || received.err == ErrTimeout {
+						break //break select
 					}
 					return err
 				}
-				if rec.Ipv4 == nil || rec.Icmp == nil {
+				rtt := received.recvTime.Sub(sendTime)
+				stats.received(rtt)
+				receivedResponse = true
+				if quiet {
 					break
 				}
-				if !rec.Ipv4.SrcIP.Equal(destinationIp) { //Check source IP
-					break
-				}
-				if !(rec.Icmp.TypeCode.Type() == 0 && rec.Icmp.TypeCode.Code() == 0) { //ICMP echo reply
-					break
-				}
-				if rec.Icmp.Seq == uint16(i)+1 && rec.Icmp.Id == id { //Id and seq#
-					rtt := rec.RecvTime.Sub(sendTime)
-					stats.received(rtt)
-					receivedResponse = true
-					if !quiet {
-						fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
-							rec.Ipv4.Length-uint16(rec.Ipv4.IHL)*4,
-							rec.Ipv4.SrcIP,
-							rec.Icmp.Seq,
-							rec.Ipv4.TTL,
-							float64(rtt.Microseconds())/1000,
-						)
-					}
-				}
+				fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
+					received.len,
+					received.source,
+					received.seq,
+					received.ttl,
+					float64(rtt.Microseconds())/1000,
+				)
 			}
 			if receivedResponse || interval == 0 || time.Now().After(nextSendTime) {
 				break
@@ -159,26 +142,10 @@ pingLoop:
 			}
 		}
 	}
-	close(recv.SignalChan)
+	close(pinger.seqChan)
 	_ = socket.Close()
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
-}
-
-func generateEchoRequest(payloadLen int, id, seq uint16) (buf []byte, err error) {
-	payload := make([]byte, payloadLen)
-	_, err = rand.Read(payload)
-	sbuf := gopacket.NewSerializeBuffer()
-	if err != nil {
-		return
-	}
-	icmp := layers.ICMPv4{
-		TypeCode: 0x0800, //echo request
-		Id:       id,
-		Seq:      seq,
-	}
-	err = gopacket.SerializeLayers(sbuf, serOptions, &icmp, gopacket.Payload(payload))
-	return sbuf.Bytes(), err
 }
 
 type pingStats struct {

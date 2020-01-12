@@ -68,7 +68,7 @@ func main() {
 		*timeoutParam,
 		interval,
 		*quietParam); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to execute pingIpv4. Error: %v", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Ping failed. %v", err)
 		os.Exit(-3)
 	}
 }
@@ -79,15 +79,15 @@ func ping(interruptChannel chan os.Signal,
 	interval time.Duration,
 	quiet bool) (err error) {
 
-	socket, err := pingsocket.NewIPv4()
+	socket, err := pingsocket.NewIPv4() //TODO specific to IPv4
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create socket: %v", err)
 	}
 	if err := socket.SetTTL(uint8(ttl)); err != nil {
-		return err
+		return fmt.Errorf("failed to set socket TTL to %v: %v", ttl, err)
 	}
 	if err := socket.SetReadTimeout(time.Duration(timeoutSec) * time.Second); err != nil {
-		return err
+		return fmt.Errorf("failed to set read timeout to %v seconds: %v", timeoutSec, err)
 	}
 	pinger := newPinger(socket, destinationIp, uint16(rand.Uint32()), payloadLen)
 	var stats pingStats
@@ -96,7 +96,7 @@ func ping(interruptChannel chan os.Signal,
 pingLoop:
 	for i := 0; count < 0 || i < count; i++ {
 		if err := pinger.send(uint16(i) + 1); err != nil {
-			return err
+			return fmt.Errorf("failed to send ping: %v", err)
 		}
 		sendTime := time.Now()
 		nextSendTime := sendTime.Add(interval)
@@ -113,7 +113,7 @@ pingLoop:
 					if received.err == ErrUnexpectedPacket || received.err == ErrTimeout {
 						break //break select
 					}
-					return err
+					return fmt.Errorf("error reading from socket: %v", err)
 				}
 				rtt := received.recvTime.Sub(sendTime)
 				stats.received(rtt)

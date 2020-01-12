@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/maltalex/goping/pingsocket"
@@ -56,7 +57,7 @@ func (p *pinger) send(seq uint16) (err error) {
 	serBuff := gopacket.NewSerializeBuffer()
 	icmp := layers.ICMPv4{TypeCode: 0x0800 /*echo request*/, Id: p.id, Seq: seq}
 	if err = gopacket.SerializeLayers(serBuff, serOptions, &icmp, gopacket.Payload(p.payload)); err != nil {
-		return err
+		return fmt.Errorf("error serializing ICMPv4 packet: %v", err)
 	}
 	return p.socket.SendTo(serBuff.Bytes(), p.destination)
 }

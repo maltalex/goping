@@ -3,9 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/maltalex/goping/pingsocket"
 	"math"
-	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -47,49 +45,28 @@ func main() {
 	interval := time.Duration(float64(time.Second) * (*intervalParam))
 	interruptChannel := make(chan os.Signal, 1)
 	signal.Notify(interruptChannel, os.Interrupt)
-	fmt.Printf("PING %v (%v) %v(%v) bytes of data.\n",
-		destinationParam,
-		destinationAddress.IP,
-		*sizeParam,
-		*sizeParam+MinPacketSize)
+	fmt.Printf("PING %v (%v) %v data bytes\n", destinationParam, destinationAddress.IP, *sizeParam)
 
-	if err := ping(
-		interruptChannel,
-		destinationAddress.IP,
-		*sizeParam,
-		*countParam,
-		*ttlParam,
-		*timeoutParam,
-		interval,
-		*quietParam); err != nil {
+	if err := ping(interruptChannel, destinationAddress.IP, *sizeParam, *countParam, *ttlParam, *timeoutParam,
+		interval, *quietParam); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Ping failed. %v", err)
 		os.Exit(-3)
 	}
 }
 
-func ping(interruptChannel chan os.Signal,
-	destinationIp net.IP,
-	payloadLen, count, ttl, timeoutSec int,
-	interval time.Duration,
-	quiet bool) (err error) {
+func ping(interruptChannel chan os.Signal, destinationIp net.IP, payloadLen, count, ttl, timeoutSec int,
+	interval time.Duration, quiet bool) (err error) {
 
-	socket, err := pingsocket.SocketForAddress(destinationIp)
-	if err != nil {
-		return fmt.Errorf("failed to create socket: %v", err)
+	pinger := NewPinger(destinationIp, payloadLen)
+	if err := pinger.Init(uint8(ttl), time.Duration(timeoutSec)*time.Second); err != nil {
+		return fmt.Errorf("initialization error %v", err)
 	}
-	if err := socket.SetTTL(uint8(ttl)); err != nil {
-		return fmt.Errorf("failed to set socket TTL to %v: %v", ttl, err)
-	}
-	if err := socket.SetReadTimeout(time.Duration(timeoutSec) * time.Second); err != nil {
-		return fmt.Errorf("failed to set read timeout to %v seconds: %v", timeoutSec, err)
-	}
-	pinger := newPinger(socket, destinationIp, uint16(rand.Uint32()), payloadLen)
 	var stats pingStats
 	startTime := time.Now()
-	pinger.startReceiver()
+	pinger.StartReceiver()
 pingLoop:
 	for i := 0; count < 0 || i < count; i++ {
-		if err := pinger.send(uint16(i) + 1); err != nil {
+		if err := pinger.Send(uint16(i) + 1); err != nil {
 			return fmt.Errorf("failed to send ping: %v", err)
 		}
 		sendTime := time.Now()
@@ -116,11 +93,7 @@ pingLoop:
 					break
 				}
 				fmt.Printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
-					received.len,
-					received.source,
-					received.seq,
-					received.ttl,
-					float64(rtt.Microseconds())/1000,
+					received.len, received.source, received.seq, received.ttl, float64(rtt.Microseconds())/1000,
 				)
 			}
 			if receivedResponse || interval == 0 || time.Now().After(nextSendTime) {
@@ -137,7 +110,6 @@ pingLoop:
 		}
 	}
 	close(pinger.seqChan)
-	_ = socket.Close()
 	fmt.Printf("---- %v ping statistics ---\n%v", destinationIp, stats.stats(time.Now().Sub(startTime)))
 	return nil
 }
@@ -171,13 +143,6 @@ func (ps *pingStats) stats(totalTime time.Duration) string {
 	rttStdDev := math.Sqrt(ps.rttSumSq/nreceived - (ps.rttSum/nreceived)*(ps.rttSum/nreceived))
 	return fmt.Sprintf("%v packets transmitted, %v received, %v%% packet loss, time %vms\n"+
 		"rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
-		ps.nsent,
-		ps.nreceived,
-		packetLoss,
-		totalTime.Milliseconds(),
-		ps.rttMin,
-		rttAvg,
-		ps.rttMax,
-		rttStdDev,
+		ps.nsent, ps.nreceived, packetLoss, totalTime.Milliseconds(), ps.rttMin, rttAvg, ps.rttMax, rttStdDev,
 	)
 }

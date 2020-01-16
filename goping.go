@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/google/gopacket"
 	"github.com/maltalex/goping/pingsocket"
 	"math"
 	"math/rand"
@@ -20,11 +19,6 @@ const (
 )
 
 var (
-	serOptions = gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-
 	timeoutParam  = flag.Int("W", 1, "Timeout, in seconds")
 	intervalParam = flag.Float64("i", 1, "Interval between pings, in seconds")
 	countParam    = flag.Int("c", -1, "Number of pings to send")
@@ -45,7 +39,7 @@ func main() {
 		os.Exit(-1)
 	}
 	destinationParam := flag.Arg(0)
-	destinationAddress, err := net.ResolveIPAddr("ip4", destinationParam)
+	destinationAddress, err := net.ResolveIPAddr("ip", destinationParam)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to resolve destinationParam %s. Error: %v", destinationParam, err)
 		os.Exit(-2)
@@ -79,7 +73,7 @@ func ping(interruptChannel chan os.Signal,
 	interval time.Duration,
 	quiet bool) (err error) {
 
-	socket, err := pingsocket.NewIPv4() //TODO specific to IPv4
+	socket, err := pingsocket.SocketForAddress(destinationIp)
 	if err != nil {
 		return fmt.Errorf("failed to create socket: %v", err)
 	}

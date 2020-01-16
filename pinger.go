@@ -14,11 +14,21 @@ import (
 const (
 	MaxPacketSize = 64 * 1024
 	MinPacketSize = 20 /*ip*/ + 8 /*icmp*/
+
 )
 
 var (
 	ErrTimeout          = pingsocket.TIMEOUTERR
 	ErrUnexpectedPacket = errors.New("unexpected packet")
+
+	serOptionsIpv6 = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: false,
+	}
+	serOptionsIpv4 = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
 )
 
 type receiveResult struct {
@@ -33,6 +43,7 @@ type receiveResult struct {
 
 type pinger struct {
 	socket      pingsocket.Pingsocket
+	ipv4        bool
 	id          uint16
 	destination net.IP
 	payload     []byte
@@ -41,10 +52,12 @@ type pinger struct {
 }
 
 func newPinger(socket pingsocket.Pingsocket, destination net.IP, id uint16, payloadLength int) *pinger {
-	payload := make([]byte, payloadLength)
-	_, _ = rand.Read(payload) //always returns nil error according to doc
+	payload := make([]byte, payloadLength) //TODO seed random
+	_, _ = rand.Read(payload)              //always returns nil error according to doc
+
 	return &pinger{
 		socket:      socket,
+		ipv4:        destination.To4() != nil,
 		destination: destination,
 		payload:     payload,
 		id:          id,
@@ -55,54 +68,111 @@ func newPinger(socket pingsocket.Pingsocket, destination net.IP, id uint16, payl
 
 func (p *pinger) send(seq uint16) (err error) {
 	serBuff := gopacket.NewSerializeBuffer()
-	icmp := layers.ICMPv4{TypeCode: 0x0800 /*echo request*/, Id: p.id, Seq: seq}
-	if err = gopacket.SerializeLayers(serBuff, serOptions, &icmp, gopacket.Payload(p.payload)); err != nil {
-		return fmt.Errorf("error serializing ICMPv4 packet: %v", err)
+	if p.ipv4 {
+		icmp := &layers.ICMPv4{TypeCode: 0x0800 /*echo request*/, Id: p.id, Seq: seq}
+		if err = gopacket.SerializeLayers(serBuff, serOptionsIpv4, icmp, gopacket.Payload(p.payload)); err != nil {
+			return fmt.Errorf("error serializing ICMPv4 packet: %v", err)
+		}
+	} else {
+		icmp := &layers.ICMPv6{TypeCode: 0x8000 /*echo request*/}
+		echo := &layers.ICMPv6Echo{Identifier: p.id, SeqNumber: seq}
+		if err = gopacket.SerializeLayers(serBuff, serOptionsIpv6, icmp, echo, gopacket.Payload(p.payload)); err != nil {
+			return fmt.Errorf("error serializing ICMPv6 packet: %v", err)
+		}
 	}
 	return p.socket.SendTo(serBuff.Bytes(), p.destination)
 }
 
 func (p *pinger) startReceiver() {
-	go func() {
-		buffer := make([]byte, MaxPacketSize)
-		for seq := range p.seqChan {
-			n, source, err := p.socket.Recvfrom(buffer)
-			receiveTime := time.Now()
-			if err != nil || n < MinPacketSize || n > MaxPacketSize {
-				p.resultChan <- receiveResult{recvTime: receiveTime, err: err}
-				continue
-			}
-			parsedPacket := gopacket.NewPacket(buffer[0:n], layers.LayerTypeIPv4, gopacket.NoCopy)
-			ipLayer := parsedPacket.Layer(layers.LayerTypeIPv4)
-			if ipLayer == nil {
-				p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
-				continue
-			}
-			ip := ipLayer.(*layers.IPv4)
-			if !ip.SrcIP.Equal(p.destination) { //Check source IP
-				p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
-				continue
-			}
-			icmpLayer := parsedPacket.Layer(layers.LayerTypeICMPv4)
-			if icmpLayer == nil {
-				p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
-				continue
-			}
-			icmp := icmpLayer.(*layers.ICMPv4)
-			if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 || //Echo Reply
-				icmp.Seq != seq || icmp.Id != p.id { //Check seq and id
-				p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
-				continue
-			}
-			p.resultChan <- receiveResult{
-				recvTime: receiveTime,
-				source:   source,
-				len:      ip.Length - uint16(ip.IHL)*4,
-				id:       icmp.Id,
-				seq:      icmp.Seq,
-				ttl:      ip.TTL,
-			}
-		} //seqChan closed
-		close(p.resultChan)
-	}()
+	if p.ipv4 {
+		go func() {
+			p.ipv4Receiver()
+		}()
+	} else {
+		go func() {
+			p.ipv6Receiver()
+		}()
+	}
+}
+
+func (p *pinger) ipv6Receiver() {
+	buffer := make([]byte, MaxPacketSize)
+	for seq := range p.seqChan {
+		n, source, err := p.socket.Recvfrom(buffer)
+		receiveTime := time.Now()
+		if err != nil || n < MinPacketSize || n > MaxPacketSize {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: err}
+			continue
+		}
+		//recvfrom on an IPv6 raw socket dosen't return the IP header (rfc3542)
+		parsedPacket := gopacket.NewPacket(buffer[0:n], layers.LayerTypeICMPv6, gopacket.NoCopy)
+		icmpLayer := parsedPacket.Layer(layers.LayerTypeICMPv6)
+		if icmpLayer == nil {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		echoLayer := parsedPacket.Layer(layers.LayerTypeICMPv6Echo)
+		if echoLayer == nil {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		echo := echoLayer.(*layers.ICMPv6Echo)
+		if echo.SeqNumber != seq || echo.Identifier != p.id { //Check seq and id
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		p.resultChan <- receiveResult{
+			recvTime: receiveTime,
+			source:   source,
+			len:      uint16(len(echo.Payload)),
+			id:       echo.Identifier,
+			seq:      echo.SeqNumber,
+			//ttl:      ip.TTL, //TODO use recvMsg to get ttl
+		}
+	} //seqChan closed
+	close(p.resultChan)
+}
+
+func (p *pinger) ipv4Receiver() {
+	buffer := make([]byte, MaxPacketSize)
+	for seq := range p.seqChan {
+		n, source, err := p.socket.Recvfrom(buffer)
+		receiveTime := time.Now()
+		if err != nil || n < MinPacketSize || n > MaxPacketSize {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: err}
+			continue
+		}
+		parsedPacket := gopacket.NewPacket(buffer[0:n], layers.LayerTypeIPv4, gopacket.NoCopy)
+		ipLayer := parsedPacket.Layer(layers.LayerTypeIPv4)
+		if ipLayer == nil {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		ip := ipLayer.(*layers.IPv4)
+		if !ip.SrcIP.Equal(p.destination) { //Check source IP
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		icmpLayer := parsedPacket.Layer(layers.LayerTypeICMPv4)
+		if icmpLayer == nil {
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		icmp := icmpLayer.(*layers.ICMPv4)
+		if icmp.TypeCode.Type() != 0 || icmp.TypeCode.Code() != 0 || //Echo Reply
+			icmp.Seq != seq || icmp.Id != p.id { //Check seq and id
+			p.resultChan <- receiveResult{recvTime: receiveTime, err: ErrUnexpectedPacket}
+			continue
+		}
+		p.resultChan <- receiveResult{
+			recvTime: receiveTime,
+			source:   source,
+			len:      ip.Length - uint16(ip.IHL)*4,
+			id:       icmp.Id,
+			seq:      icmp.Seq,
+			ttl:      ip.TTL,
+		}
+	}
+	//seqChan closed
+	close(p.resultChan)
 }

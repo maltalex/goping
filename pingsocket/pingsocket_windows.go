@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	TIMEOUTERR     = windows.WSAETIMEDOUT
-	IPPROTO_ICMPV6 = 58 //TODO replace with constant from windows module when available
+	TIMEOUTERR = windows.WSAETIMEDOUT
 )
 
 var (
@@ -62,7 +61,7 @@ type IPv6 struct {
 }
 
 func NewIPv6() (s IPv6, err error) {
-	fd, e := windows.Socket(windows.AF_INET6, windows.SOCK_RAW, IPPROTO_ICMPV6)
+	fd, e := windows.Socket(windows.AF_INET6, windows.SOCK_RAW, windows.IPPROTO_ICMPV6)
 	return IPv6{socket: fd}, e
 }
 

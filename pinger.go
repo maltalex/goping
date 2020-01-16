@@ -14,7 +14,6 @@ import (
 const (
 	MaxPacketSize = 64 * 1024
 	MinPacketSize = 20 /*ip*/ + 8 /*icmp*/
-
 )
 
 var (
@@ -142,10 +141,10 @@ func (p *pinger) ipv6Receiver() {
 		p.resultChan <- ReceiveResult{
 			recvTime: receiveTime,
 			source:   source,
-			len:      uint16(len(echo.Payload)),
+			len:      uint16(n),
 			id:       echo.Identifier,
 			seq:      echo.SeqNumber,
-			//ttl:      ip.TTL, //TODO use recvMsg to get ttl
+			//ttl:      ip.TTL, //FIXME use recvMsg to get ttl
 		}
 	}
 	close(p.resultChan)
